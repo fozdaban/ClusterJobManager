@@ -23,7 +23,7 @@ Tracks job progress across all worker nodes. Detects failures such as unresponsi
 ### Persistence (`persistence.py`)
 Stores job metadata, cluster state, and execution history. Maintains a record of all submitted jobs and their outcomes for status queries.
 
-### User Interface (`ui.py`)
+### User Interface (`interface.py`)
 Provides a command-line and API-based interface for submitting jobs, querying job status, and viewing cluster state. 
 
 
