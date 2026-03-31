@@ -1,0 +1,80 @@
+[
+  {
+    "job_id": "a2fdf62e",
+    "job_name": "MatMul",
+    "command": "gcc --version",
+    "resources": {
+      "cpus": 5,
+      "memory_mb": 512
+    },
+    "time_limit": 300,
+    "distributable": true,
+    "chunks": 4,
+    "state": "completed",
+    "submitted_at": "2026-03-30T15:44:45.276663",
+    "started_at": "2026-03-30T15:44:45.276817",
+    "completed_at": "2026-03-30T15:44:45.402485",
+    "assigned_nodes": [
+      "worker-2",
+      "worker-1",
+      "worker-0"
+    ],
+    "result": [
+      "gcc (x86_64-posix-seh-rev0, Built by MinGW-W64 project) 8.1.0\nCopyright (C) 2018 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+      "gcc (x86_64-posix-seh-rev0, Built by MinGW-W64 project) 8.1.0\nCopyright (C) 2018 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+      "gcc (x86_64-posix-seh-rev0, Built by MinGW-W64 project) 8.1.0\nCopyright (C) 2018 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+      "gcc (x86_64-posix-seh-rev0, Built by MinGW-W64 project) 8.1.0\nCopyright (C) 2018 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+    ],
+    "error": null
+  },
+  {
+    "job_id": "75b0877f",
+    "job_name": "hello_world",
+    "command": "echo Hello from the cluster",
+    "resources": {
+      "cpus": 1,
+      "memory_mb": 512
+    },
+    "time_limit": null,
+    "distributable": false,
+    "chunks": 1,
+    "state": "completed",
+    "submitted_at": "2026-03-30T15:45:16.856378",
+    "started_at": "2026-03-30T15:45:16.856705",
+    "completed_at": "2026-03-30T15:45:16.875090",
+    "assigned_nodes": [
+      "worker-0"
+    ],
+    "result": [
+      "Hello from the cluster --chunk-index 0 --total-chunks 1"
+    ],
+    "error": null
+  },
+  {
+    "job_id": "76aaecda",
+    "job_name": "distributed_task",
+    "command": "echo Processing data chunk",
+    "resources": {
+      "cpus": 3,
+      "memory_mb": 1536
+    },
+    "time_limit": null,
+    "distributable": true,
+    "chunks": 3,
+    "state": "completed",
+    "submitted_at": "2026-03-30T15:45:21.863313",
+    "started_at": "2026-03-30T15:45:21.863809",
+    "completed_at": "2026-03-30T15:45:21.886405",
+    "assigned_nodes": [
+      "worker-2",
+      "worker-1",
+      "worker-0"
+    ],
+    "result": [
+      "Processing data chunk --chunk-index 0 --total-chunks 3",
+      "Processing data chunk --chunk-index 1 --total-chunks 3",
+      "Processing data chunk --chunk-index 2 --total-chunks 3"
+    ],
+    "error": null
+  }
+]
