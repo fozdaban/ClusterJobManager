@@ -65,6 +65,7 @@ class SubTask:
         self.status = "pending"
         self.result = None
         self.error = None
+        self.run_id = 0
 
     def __repr__(self):
         return (f"SubTask(job={self.parent_job_id}, chunk={self.chunk_index}/"
@@ -367,6 +368,7 @@ class Scheduler:
             # No node free right now — undo the completed_tasks entry and re-queue
             if subtask in self.completed_tasks:
                 self.completed_tasks.remove(subtask)
+            subtask.run_id += 1
             subtask.status = "pending"
             subtask.error = None
             subtask.assigned_node = None

@@ -178,8 +178,11 @@ class ClusterSystem:
     # Internal execution helper
 
     def _run_and_release(self, subtask):
+        run_id = subtask.run_id
         job = self.job_manager.get_job(subtask.parent_job_id)
         self.executor.run_subtask(subtask, timeout=job.time_limit)
+        if subtask.run_id != run_id:
+            return
         self.scheduler.release_resources(subtask)
         self.scheduler.handle_job_completion(subtask.parent_job_id)
         self.persistence.record_job(job.to_dict())
