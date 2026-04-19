@@ -76,12 +76,19 @@ class ClusterManager:
     def __init__(self):
         self.workers = {}
 
-    def create_local_cluster(self, num_workers=3, cores_per_node=4, ram_per_node=4096):
-        """Create simulated local worker nodes for prototyping."""
-        for i in range(num_workers):
-            name = f"worker-{i}"
-            self.workers[name] = WorkerNode(name, cores=cores_per_node, ram_mb=ram_per_node)
-        print(f"[CLUSTER] Created {num_workers} local workers with {cores_per_node} cores, {ram_per_node}MB RAM each")
+    def create_local_cluster(self, num_workers=3, cores_per_node=4,
+                                ram_per_node=4096):
+            specs = [
+                (f"worker-large",  cores_per_node * 2, ram_per_node * 2),
+                (f"worker-medium", cores_per_node,     ram_per_node),
+                (f"worker-small",  max(1, cores_per_node // 2), ram_per_node // 2),
+            ]
+            for i in range(num_workers):
+                name, cores, ram = specs[i % len(specs)]
+                if num_workers > 3:
+                    name = f"{name}-{i}"
+                self.workers[name] = WorkerNode(name, cores=cores, ram_mb=ram)
+            print(f"[CLUSTER] Created {num_workers} local workers (heterogeneous sizes)")
 
     def get_available_workers(self):
         return [w for w in self.workers.values()
@@ -100,6 +107,12 @@ class ClusterManager:
                 "status": w.status,
             }
         return status
+
+    def total_cores(self):
+        return sum(w.cores for w in self.workers.values())
+
+    def total_ram_mb(self):
+        return sum(w.ram_mb for w in self.workers.values())
 
     def total_available_cores(self):
         return sum(w.available_cores() for w in self.workers.values() if w.status == "ready")
@@ -127,21 +140,37 @@ class Scheduler:
         self.completed_tasks = []
         self.max_quota_per_job = 0.5
 
-    def calculate_quota(self, job: JobDescription):
-        total_cores = sum(w.cores for w in self.cluster.workers.values())
-        total_ram = sum(w.ram_mb for w in self.cluster.workers.values())
-        queued_count = max(len(self.job_manager.get_queued_jobs()), 1)
+    def calculate_quotas(self):
+        queued = self.job_manager.get_queued_jobs()
+        if not queued:
+            return {}
 
-        fair_cores = total_cores // queued_count
-        fair_ram = total_ram // queued_count
+        total_cores = self.cluster.total_cores()
+        total_ram = self.cluster.total_ram_mb()
+
+        total_demanded_cores = sum(j.resources.get("cpus", 1) for j in queued)
+        total_demanded_ram   = sum(j.resources.get("memory_mb", 512) for j in queued)
 
         max_cores = int(total_cores * self.max_quota_per_job)
-        max_ram = int(total_ram * self.max_quota_per_job)
+        max_ram   = int(total_ram   * self.max_quota_per_job)
+ 
+        quotas = {}
+        for job in queued:
+            demanded_cores = job.resources.get("cpus",1)
+            demanded_ram = job.resources.get("memory_mb",512)
 
-        return {
-            "max_cores": min(fair_cores, max_cores),
-            "max_ram_mb": min(fair_ram, max_ram),
-        }
+            weight_cores = demanded_cores / max(total_demanded_cores, 1)
+            weight_ram = demanded_ram / max(total_demanded_ram, 1)
+
+            allocated_cores = max(1, min(int(total_cores * weight_cores), max_cores))
+            allocated_rams = max(256, min(int(total_ram * weight_ram), max_ram))
+
+            quotas[job.job_id] = {
+                "cores": allocated_cores,
+                "ram_mb" : allocated_rams
+            }
+
+        return quotas
 
     def check_resource_availability(self, job: JobDescription):
         needed_cpus = job.resources.get("cpus", 1)
@@ -156,22 +185,43 @@ class Scheduler:
             return False, f"Not enough RAM: need {needed_ram}MB, available {available_ram}MB"
         return True, "Resources available"
 
-    def decompose_job(self, job: JobDescription):
-        cpus_per_chunk = max(1, job.resources.get("cpus", 1) // job.chunks)
-        ram_per_chunk = max(256, job.resources.get("memory_mb", 512) // job.chunks)
-
+    def decompose_job(self, job: JobDescription, quota:dict):
+        quota_cores = quota["cores"]
+        quota_ram   = quota["ram_mb"]
+ 
+        available = self.cluster.get_available_workers()
+        if available:
+            min_node_cores = min(w.available_cores() for w in available)
+        else:
+            min_node_cores = 1
+ 
+        cores_per_chunk = max(1, min_node_cores)
+        chunks_by_quota = max(1, quota_cores // cores_per_chunk)
+ 
+        if job.distributable:
+            num_chunks = min(chunks_by_quota, job.chunks)
+        else:
+            num_chunks = 1
+ 
+        cores_per_chunk = max(1, quota_cores // num_chunks)
+        ram_per_chunk   = max(256, quota_ram // num_chunks)
+ 
         subtasks = []
-        for i in range(job.chunks):
-            cmd = f"{job.command} --chunk-index {i} --total-chunks {job.chunks}"
+        for i in range(num_chunks):
+            wrapped_cmd = (
+                f"CHUNK_INDEX={i} TOTAL_CHUNKS={num_chunks} "
+                f"JOB_ID={job.job_id} {job.command}"
+            )
             st = SubTask(
                 parent_job_id=job.job_id,
                 chunk_index=i,
-                total_chunks=job.chunks,
-                command=cmd,
-                cpus_needed=cpus_per_chunk,
+                total_chunks=num_chunks,
+                command=wrapped_cmd,
+                cpus_needed=cores_per_chunk,
                 ram_needed=ram_per_chunk,
             )
             subtasks.append(st)
+ 
         return subtasks
 
     def select_node_for_task(self, subtask: SubTask):
@@ -183,29 +233,51 @@ class Scheduler:
         return candidates[0]
 
     def assign_tasks_to_nodes(self, subtasks: list):
-        assigned = []
+        assigned   = []
         unassigned = []
+ 
+        used_nodes_per_job = {}   
+ 
         for st in subtasks:
-            node = self.select_node_for_task(st)
-            if node:
+            job_id = st.parent_job_id
+            used = used_nodes_per_job.setdefault(job_id, set())
+ 
+            candidates = [
+                w for w in self.cluster.get_available_workers()
+                if w.can_fit(st.cpus_needed, st.ram_needed)
+                and w.name not in used
+            ]
+            if not candidates:
+                candidates = [
+                    w for w in self.cluster.get_available_workers()
+                    if w.can_fit(st.cpus_needed, st.ram_needed)
+                ]
+ 
+            if candidates:
+                candidates.sort(key=lambda w: (w.utilization(), -w.available_cores()))
+                node = candidates[0]
                 node.allocate(st.cpus_needed, st.ram_needed, st)
                 st.assigned_node = node.name
                 st.status = "assigned"
+                used.add(node.name)
                 assigned.append(st)
             else:
                 unassigned.append(st)
+ 
         return assigned, unassigned
 
     def schedule_job(self, job: JobDescription):
         available, reason = self.check_resource_availability(job)
         if not available:
             print(f"[SCHED] Cannot schedule {job.job_name}: {reason}")
-            return False, reason
+            return 0, 0
 
-        quota = self.calculate_quota(job)
+        quotas = self.calculate_quotas()
+        quota  = quotas.get(job.job_id, {"cores": job.resources.get("cpus", 1),
+                                          "ram_mb": job.resources.get("memory_mb", 512)})
         print(f"[SCHED] Quota for {job.job_name}: {quota}")
 
-        subtasks = self.decompose_job(job)
+        subtasks = self.decompose_job(job, quota)
         print(f"[SCHED] Decomposed {job.job_name} into {len(subtasks)} sub-tasks")
 
         assigned, unassigned = self.assign_tasks_to_nodes(subtasks)
@@ -219,15 +291,14 @@ class Scheduler:
             job.update_state("running")
             job.assigned_nodes = list(set(st.assigned_node for st in assigned))
             print(f"[SCHED] {job.job_name} running on nodes: {job.assigned_nodes}")
-            return True, f"Scheduled {len(assigned)} sub-tasks, {len(unassigned)} queued"
 
-        return False, "No resources available for any sub-task"
+        return len(assigned), len(unassigned)
 
     def schedule_all_queued(self):
         results = []
         for job in self.job_manager.get_queued_jobs():
-            success, msg = self.schedule_job(job)
-            results.append((job.job_id, success, msg))
+            assigned, waiting = self.schedule_job(job)
+            results.append((job.job_id, assigned, waiting))
         return results
 
     def release_resources(self, subtask: SubTask):
