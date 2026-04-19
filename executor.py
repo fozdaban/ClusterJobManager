@@ -27,6 +27,9 @@ class Executor:
         self.results = {}
         self._lock = threading.Lock()
 
+    def _subtask_id(self, subtask: SubTask) -> str:
+        return f"{subtask.parent_job_id}-{subtask.chunk_index}"
+
     def run_subtask(self, subtask: SubTask, timeout=None):
         subtask.status = "running"
         sid   = self._subtask_id(subtask)
@@ -44,7 +47,6 @@ class Executor:
                 stdout, stderr = fabric_node.execute(
                     subtask.command,
                     quiet=True,
-                    timeout=timeout,
                 )
                 return_code = 0 if not stderr.strip() else 1
  

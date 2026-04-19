@@ -177,6 +177,34 @@ class ClusterSystem:
 
     # Internal execution helper
 
+    def _run_and_release(self, subtask):
+        job = self.job_manager.get_job(subtask.parent_job_id)
+        self.executor.run_subtask(subtask, timeout=job.time_limit)
+        self.scheduler.release_resources(subtask)
+        self.scheduler.handle_job_completion(subtask.parent_job_id)
+        self.persistence.record_job(job.to_dict())
+        self._dispatch_queued_subtasks()
+
+    def _dispatch_queued_subtasks(self):
+        still_waiting = []
+        for subtask in list(self.scheduler.task_queue):
+            node = self.scheduler.select_node_for_task(subtask)
+            if node:
+                node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
+                subtask.assigned_node = node.name
+                subtask.status = "assigned"
+                self.scheduler.active_tasks.append(subtask)
+                print(f"[SYSTEM] Dispatched queued subtask {subtask.parent_job_id}-{subtask.chunk_index} to {node.name}")
+                job = self.job_manager.get_job(subtask.parent_job_id)
+                job.update_state("running")
+                job.assigned_nodes = list(set((job.assigned_nodes or []) + [node.name]))
+                t = threading.Thread(target=self._run_and_release,
+                                     args=(subtask,), daemon=True)
+                t.start()
+            else:
+                still_waiting.append(subtask)
+        self.scheduler.task_queue = still_waiting
+
     def _run_active_subtasks(self):
         """
         Launch all currently scheduled subtasks in parallel threads.
@@ -195,17 +223,8 @@ class ClusterSystem:
 
         wall_start = time.time()
 
-        def _run_and_release(subtask):
-            job    = self.job_manager.get_job(subtask.parent_job_id)
-            result = self.executor.run_subtask(
-                subtask, timeout=job.time_limit
-            )
-            self.scheduler.release_resources(subtask)
-            self.scheduler.handle_job_completion(subtask.parent_job_id)
-            self.persistence.record_job(job.to_dict())
-
         threads = [
-            threading.Thread(target=_run_and_release, args=(st,), daemon=True)
+            threading.Thread(target=self._run_and_release, args=(st,), daemon=True)
             for st in subtasks
         ]
         for t in threads:
@@ -339,14 +358,8 @@ class ClusterSystem:
         # Launch subtasks in background threads
         subtasks = list(self.scheduler.active_tasks)
 
-        def _bg_run(subtask):
-            job = self.job_manager.get_job(subtask.parent_job_id)
-            self.executor.run_subtask(subtask, timeout=job.time_limit)
-            self.scheduler.release_resources(subtask)
-            self.scheduler.handle_job_completion(subtask.parent_job_id)
-
         threads = [
-            threading.Thread(target=_bg_run, args=(st,), daemon=True)
+            threading.Thread(target=self._run_and_release, args=(st,), daemon=True)
             for st in subtasks
         ]
         for t in threads:
@@ -422,14 +435,8 @@ class ClusterSystem:
         # Launch all subtasks in background
         subtasks = list(self.scheduler.active_tasks)
 
-        def _bg_run(subtask):
-            job = self.job_manager.get_job(subtask.parent_job_id)
-            self.executor.run_subtask(subtask, timeout=job.time_limit)
-            self.scheduler.release_resources(subtask)
-            self.scheduler.handle_job_completion(subtask.parent_job_id)
-
         threads = [
-            threading.Thread(target=_bg_run, args=(st,), daemon=True)
+            threading.Thread(target=self._run_and_release, args=(st,), daemon=True)
             for st in subtasks
         ]
         for t in threads:

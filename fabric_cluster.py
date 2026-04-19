@@ -2,22 +2,30 @@ from fabrictestbed_extensions.fablib.fablib import FablibManager as fablib_manag
 from scheduler import WorkerNode, ClusterManager
  
 SLICE_NAME = "cluster_job_manager"
-NODE_IMAGE = "default_ubunut_22"
+NODE_IMAGE = "default_ubuntu_22"
 
-DEFAULT_WORKER_SPECS = {
-    {"name": "worker-large",  "cores": 8, "ram": 16, "disk": 20},
-    {"name": "worker-medium", "cores": 4, "ram": 8,  "disk": 20},
+DEFAULT_WORKER_SPECS = [
+    {"name": "worker-large",  "cores": 2, "ram": 8,  "disk": 20},
+    {"name": "worker-medium", "cores": 2, "ram": 6,  "disk": 20},
     {"name": "worker-small",  "cores": 2, "ram": 4,  "disk": 20},
-}
+]
 
 def provide_fabric_cluster(fablib, cluster: ClusterManager, workers=None, site=None, slice_name = SLICE_NAME):
     if workers is None:
         workers = DEFAULT_WORKER_SPECS
- 
+
+    try:
+        existing = fablib.get_slice(name=slice_name)
+        if existing:
+            print(f"[FABRIC] Slice '{slice_name}' already exists, reconnecting...")
+            return get_existing_slice(fablib, cluster, workers=workers, slice_name=slice_name)
+    except Exception:
+        pass
+
     if site is None:
         site = fablib.get_random_site()
     print(f"[FABRIC] Provisioning {len(workers)} workers at site: {site}")
- 
+
     slice_obj = fablib.new_slice(name=slice_name)
     for spec in workers:
         slice_obj.add_node(

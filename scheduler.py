@@ -189,28 +189,21 @@ class Scheduler:
         quota_cores = quota["cores"]
         quota_ram   = quota["ram_mb"]
  
-        available = self.cluster.get_available_workers()
-        if available:
-            min_node_cores = min(w.available_cores() for w in available)
-        else:
-            min_node_cores = 1
- 
-        cores_per_chunk = max(1, min_node_cores)
-        chunks_by_quota = max(1, quota_cores // cores_per_chunk)
- 
         if job.distributable:
-            num_chunks = min(chunks_by_quota, job.chunks)
+            num_chunks = min(job.chunks, len(self.cluster.get_available_workers()))
+            num_chunks = max(1, num_chunks)
         else:
             num_chunks = 1
  
-        cores_per_chunk = max(1, quota_cores // num_chunks)
-        ram_per_chunk   = max(256, quota_ram // num_chunks)
+        max_node_cores  = max((w.cores for w in self.cluster.workers.values()), default=1)
+        cores_per_chunk = min(max(1, quota_cores // num_chunks), max_node_cores)
+        ram_per_chunk   = max(256, job.resources.get("memory_mb", 512) // num_chunks)
  
         subtasks = []
         for i in range(num_chunks):
             wrapped_cmd = (
-                f"CHUNK_INDEX={i} TOTAL_CHUNKS={num_chunks} "
-                f"JOB_ID={job.job_id} {job.command}"
+                f"export CHUNK_INDEX={i} TOTAL_CHUNKS={num_chunks} "
+                f"JOB_ID={job.job_id}; {job.command}"
             )
             st = SubTask(
                 parent_job_id=job.job_id,
@@ -295,10 +288,42 @@ class Scheduler:
         return len(assigned), len(unassigned)
 
     def schedule_all_queued(self):
+        queued = self.job_manager.get_queued_jobs()
+        if not queued:
+            return []
+
+        quotas = self.calculate_quotas()
+
+        # Decompose all jobs into subtasks first — no allocation yet
+        all_subtasks = []
+        for job in queued:
+            quota = quotas.get(job.job_id, {"cores": job.resources.get("cpus", 1),
+                                             "ram_mb": job.resources.get("memory_mb", 512)})
+            print(f"[SCHED] Quota for {job.job_name}: {quota}")
+            subtasks = self.decompose_job(job, quota)
+            print(f"[SCHED] Decomposed {job.job_name} into {len(subtasks)} sub-tasks")
+            all_subtasks.extend(subtasks)
+
+        # Joint assignment — all jobs compete for nodes simultaneously
+        assigned, unassigned = self.assign_tasks_to_nodes(all_subtasks)
+
         results = []
-        for job in self.job_manager.get_queued_jobs():
-            assigned, waiting = self.schedule_job(job)
-            results.append((job.job_id, assigned, waiting))
+        for job in queued:
+            job_assigned   = [st for st in assigned   if st.parent_job_id == job.job_id]
+            job_unassigned = [st for st in unassigned if st.parent_job_id == job.job_id]
+
+            if job_unassigned:
+                self.task_queue.extend(job_unassigned)
+                print(f"[SCHED] {len(job_unassigned)} sub-task(s) queued for {job.job_name}")
+
+            if job_assigned:
+                self.active_tasks.extend(job_assigned)
+                job.update_state("running")
+                job.assigned_nodes = list(set(st.assigned_node for st in job_assigned))
+                print(f"[SCHED] {job.job_name} running on: {job.assigned_nodes}")
+
+            results.append((job.job_id, len(job_assigned), len(job_unassigned)))
+
         return results
 
     def release_resources(self, subtask: SubTask):
@@ -312,7 +337,8 @@ class Scheduler:
     def handle_job_completion(self, job_id: str):
         job = self.job_manager.get_job(job_id)
         job_tasks = [t for t in self.completed_tasks if t.parent_job_id == job_id]
-        all_done = len(job_tasks) == job.chunks
+        expected = job_tasks[0].total_chunks if job_tasks else job.chunks
+        all_done = len(job_tasks) == expected
         all_ok = all(t.status == "completed" for t in job_tasks)
 
         if all_done and all_ok:
@@ -338,7 +364,12 @@ class Scheduler:
             print(f"[SCHED] Rescheduled failed sub-task to {node.name}")
             return True
         else:
+            # No node free right now — re-queue and wait for capacity
+            subtask.status = "pending"
+            subtask.error = None
+            subtask.assigned_node = None
+            self.task_queue.append(subtask)
             job = self.job_manager.get_job(subtask.parent_job_id)
-            job.update_state("failed", error=f"Sub-task {subtask.chunk_index} failed: {error}")
-            print(f"[SCHED] Job {job.job_name} failed: no node available for reschedule")
+            job.update_state("queued")
+            print(f"[SCHED] No node available for {subtask.parent_job_id}-{subtask.chunk_index}, re-queued")
             return False
