@@ -87,7 +87,7 @@ class Monitor:
             else:
                 failed += 1
 
-        self.log(f"Node {node_name}: {rescheduled} tasks rescheduled, {failed} failed")
+        self.log(f"Node {node_name}: {rescheduled} tasks rescheduled, {failed} re-queued")
         return rescheduled, failed
 
     def check_timeouts(self):
