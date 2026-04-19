@@ -455,21 +455,23 @@ class ClusterSystem:
         print("\nCluster state after failure:")
         self.show_cluster()
 
-        # Continue polling
+        # Continue polling — extend limit when a re-queued job is still running
         print(f"\nPolling every {poll_interval}s...")
-        for poll in range(polls):
+        max_polls = polls * 3
+        for poll in range(max_polls):
             time.sleep(poll_interval)
             failed_nodes, timed_out = self.monitor.poll()
             running = len(self.job_manager.get_jobs_by_state("running"))
+            queued  = len(self.job_manager.get_jobs_by_state("queued"))
             done    = len([j for j in self.job_manager.get_all_jobs()
                            if j["state"] in ("completed", "failed")])
-            print(f"  Poll {poll+1:>2}: running={running}, done={done}, "
+            print(f"  Poll {poll+1:>2}: running={running}, queued={queued}, done={done}, "
                   f"failed_nodes={failed_nodes}, timeouts={timed_out}")
-            if running == 0:
+            if running == 0 and queued == 0:
                 break
 
         for t in threads:
-            t.join(timeout=5)
+            t.join(timeout=2)
 
         print("\nFinal job states:")
         self.show_jobs()

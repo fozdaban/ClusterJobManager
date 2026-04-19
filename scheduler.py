@@ -364,7 +364,9 @@ class Scheduler:
             print(f"[SCHED] Rescheduled failed sub-task to {node.name}")
             return True
         else:
-            # No node free right now — re-queue and wait for capacity
+            # No node free right now — undo the completed_tasks entry and re-queue
+            if subtask in self.completed_tasks:
+                self.completed_tasks.remove(subtask)
             subtask.status = "pending"
             subtask.error = None
             subtask.assigned_node = None
