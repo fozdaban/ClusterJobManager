@@ -25,58 +25,85 @@ class Executor:
     def __init__(self, cluster: ClusterManager):
         self.cluster = cluster
         self.results = {}
+        self._lock = threading.Lock()
+
+    def _subtask_id(self, subtask: SubTask) -> str:
+        return f"{subtask.parent_job_id}-{subtask.chunk_index}"
 
     def run_subtask(self, subtask: SubTask, timeout=None):
-        """Execute a single sub-task locally as a subprocess."""
         subtask.status = "running"
-        print(f"[EXEC] Running {subtask} on {subtask.assigned_node}")
-
+        sid   = self._subtask_id(subtask)
         start = time.time()
+ 
+        worker      = self.cluster.workers.get(subtask.assigned_node)
+        fabric_node = getattr(worker, "fabric_node", None) if worker else None
+ 
+        print(f"[EXEC] {'SSH' if fabric_node else 'local'} "
+              f"subtask {sid} on {subtask.assigned_node}")
+ 
         try:
-            proc = subprocess.run(
-                subtask.command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            # Real FABRIC SSH execution
+            if fabric_node is not None:
+                stdout, stderr = fabric_node.execute(
+                    subtask.command,
+                    quiet=True,
+                )
+                return_code = 0 if not stderr.strip() else 1
+ 
+            else:
+                # Fallback local subprocess
+                proc = subprocess.run(
+                    subtask.command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                stdout      = proc.stdout.strip()
+                stderr      = proc.stderr.strip()
+                return_code = proc.returncode
+ 
             duration = time.time() - start
-
-            result = TaskResult(
-                subtask_id=f"{subtask.parent_job_id}-{subtask.chunk_index}",
-                stdout=proc.stdout.strip(),
-                stderr=proc.stderr.strip(),
-                return_code=proc.returncode,
+            result   = TaskResult(
+                subtask_id=sid,
+                stdout=stdout.strip() if stdout else "",
+                stderr=stderr.strip() if stderr else "",
+                return_code=return_code,
                 duration=round(duration, 3),
             )
-
+ 
         except subprocess.TimeoutExpired:
             duration = time.time() - start
-            result = TaskResult(
-                subtask_id=f"{subtask.parent_job_id}-{subtask.chunk_index}",
-                stderr="Task timed out",
+            result   = TaskResult(
+                subtask_id=sid,
+                stderr=f"Subtask timed out after {timeout}s",
                 return_code=-1,
                 duration=round(duration, 3),
             )
-
+ 
         except Exception as e:
             duration = time.time() - start
-            result = TaskResult(
-                subtask_id=f"{subtask.parent_job_id}-{subtask.chunk_index}",
+            result   = TaskResult(
+                subtask_id=sid,
                 stderr=str(e),
                 return_code=-1,
                 duration=round(duration, 3),
             )
-
+ 
         if result.success:
             subtask.status = "completed"
             subtask.result = result.stdout
         else:
             subtask.status = "failed"
-            subtask.error = result.stderr
-
-        self.results[result.subtask_id] = result
-        print(f"[EXEC] {subtask} finished in {result.duration}s (code={result.return_code})")
+            subtask.error  = result.stderr
+ 
+        with self._lock:
+            self.results[sid] = result
+ 
+        print(f"[EXEC] {sid} finished in {result.duration}s "
+              f"(rc={result.return_code})"
+              + (f" ERROR: {result.stderr[:80]}" if not result.success else ""))
+ 
         return result
 
     def run_subtasks_parallel(self, subtasks: list, timeout=None):

@@ -41,14 +41,34 @@ class Monitor:
             "assigned_nodes": job.assigned_nodes,
         }
 
-    def check_node_health(self):
-        """Check all worker nodes and flag any that are unresponsive."""
-        issues = []
-        for name, worker in self.cluster.workers.items():
+    def check_node_health(self, ssh_timeout=10):
+        newly_failed = []
+ 
+        for name, worker in list(self.cluster.workers.items()):
             if worker.status == "unresponsive":
-                issues.append(name)
-                self.log(f"Node {name} is unresponsive")
-        return issues
+                continue    # already known bad
+ 
+            fabric_node = getattr(worker, "fabric_node", None)
+            if fabric_node is None:
+                continue    # local/simulated — no probe needed
+ 
+            try:
+                stdout, stderr = fabric_node.execute(
+                    "echo alive",
+                    quiet=True,
+                    timeout=ssh_timeout,
+                )
+                if "alive" not in stdout:
+                    raise RuntimeError(
+                        f"Unexpected probe response: {stdout!r}"
+                    )
+                # Node is healthy
+            except Exception as e:
+                self.log(f"Node {name} FAILED health probe: {e}")
+                self.handle_node_failure(name)
+                newly_failed.append(name)
+ 
+        return newly_failed
 
     def handle_node_failure(self, node_name: str):
         """Handle a failed node by rescheduling its tasks."""
@@ -67,7 +87,7 @@ class Monitor:
             else:
                 failed += 1
 
-        self.log(f"Node {node_name}: {rescheduled} tasks rescheduled, {failed} failed")
+        self.log(f"Node {node_name}: {rescheduled} tasks rescheduled, {failed} re-queued")
         return rescheduled, failed
 
     def check_timeouts(self):
@@ -103,6 +123,13 @@ class Monitor:
             "queued_tasks": len(self.scheduler.task_queue),
             "cluster": self.cluster.get_cluster_status(),
         }
+
+    def poll(self):
+        """Single poll cycle: check node health and job timeouts.
+        Returns (failed_nodes, timed_out_job_ids)."""
+        failed_nodes = self.check_node_health()
+        timed_out    = self.check_timeouts()
+        return failed_nodes, timed_out
 
     def get_logs(self, last_n=20):
         return self.logs[-last_n:]
