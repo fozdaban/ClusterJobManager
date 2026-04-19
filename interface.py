@@ -41,7 +41,7 @@ class NotebookUI:
 
         def _loop():
             while self._polling:
-                self.monitor.poll(interval=interval)
+                self.monitor.poll()
                 time.sleep(interval)
 
         self._poll_thread = threading.Thread(target=_loop, daemon=True)
@@ -236,9 +236,12 @@ class NotebookUI:
                 content = (file_info["content"]
                            if isinstance(file_info, dict)
                            else file_info.content)
-                name    = (file_info["metadata"]["name"]
+                name    = (file_info.get("metadata", {}).get("name")
+                           or file_info.get("name")
                            if isinstance(file_info, dict)
                            else file_info.name)
+                if isinstance(content, memoryview):
+                    content = bytes(content)
                 text    = content.decode("utf-8") \
                     if isinstance(content, bytes) else content
                 data    = (yaml.safe_load(text)
