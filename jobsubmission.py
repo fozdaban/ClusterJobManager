@@ -159,8 +159,21 @@ class JobSubmissionManager:
         print(f"[SUBMITTED] {job}")
         return job
 
-    def submit_from_file(self, filepath: str) -> JobDescription:
-        return self.submit(self.load_from_file(filepath))
+    def submit_many(self, data) -> list:
+        """Accept a single job dict, a list of job dicts, or {"jobs": [...]}."""
+        if isinstance(data, dict) and "jobs" in data:
+            items = data["jobs"]
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = [data]
+        results = []
+        for item in items:
+            results.append(self.submit(item))
+        return results
+
+    def submit_from_file(self, filepath: str) -> list:
+        return self.submit_many(self.load_from_file(filepath))
 
     def get_job(self, job_id: str) -> JobDescription:
         if job_id not in self.jobs:

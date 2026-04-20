@@ -178,7 +178,7 @@ class NotebookUI:
         self.logs_refresh_btn.on_click(self._on_logs_refresh)
 
         return widgets.VBox([
-            widgets.HTML("<h3>Monitor Logs</h3>"),
+            widgets.HTML("<h3>Event Logs &amp; Task Output</h3>"),
             self.logs_refresh_btn, self.logs_out,
         ])
 
@@ -197,7 +197,7 @@ class NotebookUI:
         for i, title in enumerate([
             "Submit Job", "Upload File", "Run All",
             "Dashboard", "Job Details", "Cancel Job",
-            "Cluster", "Logs"
+            "Cluster", "Logs & Output"
         ]):
             tabs.set_title(i, title)
         display(tabs)
@@ -247,9 +247,10 @@ class NotebookUI:
                 data    = (yaml.safe_load(text)
                            if name.endswith((".yaml", ".yml"))
                            else _json.loads(text))
-                job = self.job_manager.submit(data)
-                print(f"Job queued from file: {job.job_id} ({job.job_name})")
-                print("Use 'Run All' tab to schedule and execute.")
+                jobs = self.job_manager.submit_many(data)
+                for job in jobs:
+                    print(f"Job queued: {job.job_id} ({job.job_name})")
+                print(f"{len(jobs)} job(s) queued. Use 'Run All' tab to execute.")
             except Exception as e:
                 print(f"Error: {e}")
 
@@ -276,12 +277,13 @@ class NotebookUI:
             print(f"\nExecuting {len(all_active)} subtask(s) in parallel...")
 
             def _run_and_release(subtask):
-                job     = self.job_manager.get_job(subtask.parent_job_id)
-                timeout = job.time_limit
-                self.executor.run_subtask(subtask, timeout=timeout)
-                self.scheduler.release_resources(subtask)
-                self.scheduler.handle_job_completion(subtask.parent_job_id)
-                self.persistence.record_job(job.to_dict())
+                with self.run_all_out:
+                    job     = self.job_manager.get_job(subtask.parent_job_id)
+                    timeout = job.time_limit
+                    self.executor.run_subtask(subtask, timeout=timeout)
+                    self.scheduler.release_resources(subtask)
+                    self.scheduler.handle_job_completion(subtask.parent_job_id)
+                    self.persistence.record_job(job.to_dict())
 
             threads = [
                 threading.Thread(target=_run_and_release, args=(st,), daemon=True)
@@ -341,6 +343,24 @@ class NotebookUI:
                 status = self.monitor.check_job_status(job_id)
                 for k, v in status.items():
                     print(f"{k}: {v}")
+
+                job_tasks = sorted(
+                    [t for t in self.scheduler.completed_tasks if t.parent_job_id == job_id],
+                    key=lambda t: t.chunk_index,
+                )
+                if job_tasks:
+                    print("\n--- Subtask Output ---")
+                    for task in job_tasks:
+                        sid = f"{job_id}-{task.chunk_index}"
+                        result = self.executor.results.get(sid)
+                        print(f"\n[Chunk {task.chunk_index}/{task.total_chunks}]"
+                              f" status={task.status}")
+                        if result:
+                            print(f"  duration={result.duration}s  rc={result.return_code}")
+                            if result.stdout:
+                                print(f"  stdout:\n    {result.stdout}")
+                            if result.stderr:
+                                print(f"  stderr:\n    {result.stderr}")
             except KeyError:
                 print(f"Job '{job_id}' not found.")
 
@@ -364,6 +384,13 @@ class NotebookUI:
             if not status:
                 print("No cluster initialized.")
                 return
+
+            # Count completed tasks per node from scheduler history
+            completed_per_node = {}
+            for t in self.scheduler.completed_tasks:
+                completed_per_node[t.assigned_node] = \
+                    completed_per_node.get(t.assigned_node, 0) + 1
+
             html  = ("<table style='width:100%;border-collapse:collapse;'>"
                      "<tr style='background:#333;color:white;'>"
                      "<th style='padding:6px'>Node</th>"
@@ -372,14 +399,23 @@ class NotebookUI:
                      "<th style='padding:6px'>RAM (MB)</th>"
                      "<th style='padding:6px'>RAM Used</th>"
                      "<th style='padding:6px'>Utilization</th>"
-                     "<th style='padding:6px'>Tasks</th>"
+                     "<th style='padding:6px'>Active Tasks</th>"
+                     "<th style='padding:6px'>Completed Tasks</th>"
                      "<th style='padding:6px'>Status</th>"
                      "</tr>")
             for name, info in status.items():
-                util = info["utilization"]
-                bg   = ("#c3e6cb" if util < 50
-                        else "#ffeeba" if util < 80
-                        else "#f5c6cb")
+                util        = info["utilization"]
+                node_status = info["status"]
+                completed   = completed_per_node.get(name, 0)
+                if node_status == "unresponsive":
+                    bg          = "#f5c6cb"
+                    status_html = "<b style='color:#c0392b'>unresponsive</b>"
+                elif node_status == "busy":
+                    bg          = "#b8daff"
+                    status_html = "<b style='color:#1a6bbd'>busy</b>"
+                else:
+                    bg          = "#c3e6cb"
+                    status_html = "<span style='color:#1e7e34'>idle</span>"
                 html += (f"<tr style='background:{bg}'>"
                          f"<td style='padding:6px'>{name}</td>"
                          f"<td style='padding:6px'>{info['cores']}</td>"
@@ -388,7 +424,8 @@ class NotebookUI:
                          f"<td style='padding:6px'>{info['ram_used_mb']}</td>"
                          f"<td style='padding:6px'>{util}%</td>"
                          f"<td style='padding:6px'>{info['tasks']}</td>"
-                         f"<td style='padding:6px'>{info['status']}</td>"
+                         f"<td style='padding:6px'>{completed}</td>"
+                         f"<td style='padding:6px'>{status_html}</td>"
                          "</tr>")
             html += "</table>"
             display(HTML(html))
@@ -396,9 +433,23 @@ class NotebookUI:
     def _on_logs_refresh(self, _button):
         self.logs_out.clear_output()
         with self.logs_out:
+            print("=== System Event Logs ===")
             logs = self.monitor.get_logs(last_n=40)
             if not logs:
                 print("No monitor logs yet.")
-                return
-            for entry in logs:
-                print(entry)
+            else:
+                for entry in logs:
+                    print(entry)
+
+            print("\n=== Task Output ===")
+            if not self.executor.results:
+                print("No task results yet.")
+            else:
+                for sid, result in sorted(self.executor.results.items()):
+                    status_str = "OK" if result.success else "FAILED"
+                    print(f"\n[{sid}] {status_str}"
+                          f" ({result.duration}s, rc={result.return_code})")
+                    if result.stdout:
+                        print(f"  stdout:\n    {result.stdout}")
+                    if result.stderr:
+                        print(f"  stderr:\n    {result.stderr}")

@@ -44,12 +44,32 @@ class Executor:
         try:
             # Real FABRIC SSH execution
             if fabric_node is not None:
-                stdout, stderr = fabric_node.execute(
-                    subtask.command,
-                    quiet=True,
-                )
-                return_code = 0 if not stderr.strip() else 1
- 
+                try:
+                    stdout, stderr = fabric_node.execute(
+                        subtask.command,
+                        quiet=True,
+                    )
+                    return_code = 0
+                except Exception as ssh_err:
+                    err_str = str(ssh_err)
+                    # Distinguish timeouts from other SSH failures
+                    if any(kw in type(ssh_err).__name__.lower() or kw in err_str.lower()
+                           for kw in ("timeout", "timedout", "timed out")):
+                        duration = time.time() - start
+                        result = TaskResult(
+                            subtask_id=sid,
+                            stderr=f"Subtask timed out after {timeout}s (SSH)",
+                            return_code=-1,
+                            duration=round(duration, 3),
+                        )
+                        subtask.status = "failed"
+                        subtask.error  = result.stderr
+                        with self._lock:
+                            self.results[sid] = result
+                        print(f"[EXEC] {sid} SSH timeout after {result.duration}s")
+                        return result
+                    raise
+
             else:
                 # Fallback local subprocess
                 proc = subprocess.run(
@@ -62,7 +82,7 @@ class Executor:
                 stdout      = proc.stdout.strip()
                 stderr      = proc.stderr.strip()
                 return_code = proc.returncode
- 
+
             duration = time.time() - start
             result   = TaskResult(
                 subtask_id=sid,
@@ -71,7 +91,7 @@ class Executor:
                 return_code=return_code,
                 duration=round(duration, 3),
             )
- 
+
         except subprocess.TimeoutExpired:
             duration = time.time() - start
             result   = TaskResult(
@@ -80,7 +100,7 @@ class Executor:
                 return_code=-1,
                 duration=round(duration, 3),
             )
- 
+
         except Exception as e:
             duration = time.time() - start
             result   = TaskResult(

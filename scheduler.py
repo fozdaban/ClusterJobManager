@@ -98,6 +98,16 @@ class ClusterManager:
     def get_cluster_status(self):
         status = {}
         for name, w in self.workers.items():
+            if w.fabric_node is None:
+                # Derive live status for local nodes (health checks don't run on them)
+                if w.status == "unresponsive":
+                    live_status = "unresponsive"
+                elif w.assigned_tasks:
+                    live_status = "busy"
+                else:
+                    live_status = "idle"
+            else:
+                live_status = w.status
             status[name] = {
                 "cores": w.cores,
                 "cores_used": w.allocated_cores,
@@ -105,7 +115,7 @@ class ClusterManager:
                 "ram_used_mb": w.allocated_ram_mb,
                 "utilization": round(w.utilization() * 100, 1),
                 "tasks": len(w.assigned_tasks),
-                "status": w.status,
+                "status": live_status,
             }
         return status
 
