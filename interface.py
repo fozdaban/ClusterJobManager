@@ -254,6 +254,39 @@ class NotebookUI:
             except Exception as e:
                 print(f"Error: {e}")
 
+    def _run_and_release_subtask(self, subtask):
+        job = self.job_manager.get_job(subtask.parent_job_id)
+        self.executor.run_subtask(subtask, timeout=job.time_limit)
+        self.scheduler.release_resources(subtask)
+        self.scheduler.handle_job_completion(subtask.parent_job_id)
+        self.persistence.record_job(job.to_dict())
+        self._dispatch_queued_subtasks()
+
+    def _dispatch_queued_subtasks(self):
+        to_run = []
+        with self.scheduler._lock:
+            still_waiting = []
+            for subtask in list(self.scheduler.task_queue):
+                node = self.scheduler.select_node_for_task(subtask)
+                if node:
+                    node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
+                    subtask.assigned_node = node.name
+                    subtask.status = "assigned"
+                    self.scheduler.active_tasks.append(subtask)
+                    to_run.append(subtask)
+                else:
+                    still_waiting.append(subtask)
+            self.scheduler.task_queue = still_waiting
+
+        for subtask in to_run:
+            job = self.job_manager.get_job(subtask.parent_job_id)
+            job.update_state("running")
+            job.assigned_nodes = list(set((job.assigned_nodes or []) + [subtask.assigned_node]))
+            threading.Thread(
+                target=self._run_and_release_subtask,
+                args=(subtask,), daemon=True
+            ).start()
+
     def _on_run_all(self, _button):
         self.run_all_out.clear_output()
         with self.run_all_out:
@@ -274,31 +307,31 @@ class NotebookUI:
                 print("No subtasks could be assigned.")
                 return
 
-            print(f"\nExecuting {len(all_active)} subtask(s) in parallel...")
+            print(f"\nExecuting {len(all_active)} subtask(s) in parallel "
+                  f"(running in background — refresh Cluster/Dashboard tabs to monitor)...")
 
-            def _run_and_release(subtask):
-                with self.run_all_out:
-                    job     = self.job_manager.get_job(subtask.parent_job_id)
-                    timeout = job.time_limit
-                    self.executor.run_subtask(subtask, timeout=timeout)
-                    self.scheduler.release_resources(subtask)
-                    self.scheduler.handle_job_completion(subtask.parent_job_id)
-                    self.persistence.record_job(job.to_dict())
+        threads = [
+            threading.Thread(target=self._run_and_release_subtask, args=(st,), daemon=True)
+            for st in all_active
+        ]
+        for t in threads:
+            t.start()
 
-            threads = [
-                threading.Thread(target=_run_and_release, args=(st,), daemon=True)
-                for st in all_active
-            ]
-            for t in threads:
-                t.start()
+        def _wait_and_report():
             for t in threads:
                 t.join()
+            # Wait for any dispatched follow-on subtasks to drain too
+            while any(st.status in ("assigned", "running")
+                      for st in self.scheduler.active_tasks):
+                time.sleep(1)
+            with self.run_all_out:
+                print("\nAll subtasks finished.")
+                for job_id, _, _ in results:
+                    job = self.job_manager.get_job(job_id)
+                    print(f"  {job.job_name}: {job.state}"
+                          + (f" — {job.error}" if job.error else ""))
 
-            print("\nAll subtasks finished.")
-            for job_id, _, _ in results:
-                job = self.job_manager.get_job(job_id)
-                print(f"  {job.job_name}: {job.state}"
-                      + (f" — {job.error}" if job.error else ""))
+        threading.Thread(target=_wait_and_report, daemon=True).start()
 
     def _on_refresh(self, _button):
         self.status_out.clear_output()

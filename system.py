@@ -189,24 +189,28 @@ class ClusterSystem:
         self._dispatch_queued_subtasks()
 
     def _dispatch_queued_subtasks(self):
-        still_waiting = []
-        for subtask in list(self.scheduler.task_queue):
-            node = self.scheduler.select_node_for_task(subtask)
-            if node:
-                node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
-                subtask.assigned_node = node.name
-                subtask.status = "assigned"
-                self.scheduler.active_tasks.append(subtask)
-                print(f"[SYSTEM] Dispatched queued subtask {subtask.parent_job_id}-{subtask.chunk_index} to {node.name}")
-                job = self.job_manager.get_job(subtask.parent_job_id)
-                job.update_state("running")
-                job.assigned_nodes = list(set((job.assigned_nodes or []) + [node.name]))
-                t = threading.Thread(target=self._run_and_release,
-                                     args=(subtask,), daemon=True)
-                t.start()
-            else:
-                still_waiting.append(subtask)
-        self.scheduler.task_queue = still_waiting
+        to_run = []
+        with self.scheduler._lock:
+            still_waiting = []
+            for subtask in list(self.scheduler.task_queue):
+                node = self.scheduler.select_node_for_task(subtask)
+                if node:
+                    node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
+                    subtask.assigned_node = node.name
+                    subtask.status = "assigned"
+                    self.scheduler.active_tasks.append(subtask)
+                    to_run.append(subtask)
+                else:
+                    still_waiting.append(subtask)
+            self.scheduler.task_queue = still_waiting
+
+        for subtask in to_run:
+            print(f"[SYSTEM] Dispatched queued subtask {subtask.parent_job_id}-{subtask.chunk_index} to {subtask.assigned_node}")
+            job = self.job_manager.get_job(subtask.parent_job_id)
+            job.update_state("running")
+            job.assigned_nodes = list(set((job.assigned_nodes or []) + [subtask.assigned_node]))
+            threading.Thread(target=self._run_and_release,
+                             args=(subtask,), daemon=True).start()
 
     def _run_active_subtasks(self):
         """

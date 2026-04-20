@@ -1,0 +1,44 @@
+- job_name: sleep_test
+  command: sleep 40
+  resources:
+    cpus: 1
+    memory_mb: 512
+  time_limit: 60
+  distributable: false
+  chunks: 1
+
+- job_name: cpu_stress_test
+  command: timeout 30 yes > /dev/null
+  resources:
+    cpus: 4
+    memory_mb: 1024
+  time_limit: 45
+  distributable: true
+  chunks: 4
+
+- job_name: memory_alloc_test
+  command: python3 -c "import time; x = ' ' * 500_000_000; time.sleep(30)"
+  resources:
+    cpus: 2
+    memory_mb: 768
+  time_limit: 50
+  distributable: false
+  chunks: 1
+
+- job_name: parallel_chunk_test
+  command: for i in {1..10}; do sleep $((RANDOM % 20)); done
+  resources:
+    cpus: 8
+    memory_mb: 2048
+  time_limit: 120
+  distributable: true
+  chunks: 5
+
+- job_name: exit_code_test
+  command: sleep 10 && exit 1
+  resources:
+    cpus: 1
+    memory_mb: 256
+  time_limit: 30
+  distributable: false
+  chunks: 1

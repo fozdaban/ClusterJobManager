@@ -4,6 +4,8 @@ Quota allocation, task decomposition, load balancing, and job-to-node mapping.
 This prototype simulates worker nodes without FABRIC.
 """
 
+import threading
+
 from jobsubmission import JobDescription, JobSubmissionManager
 
 
@@ -98,23 +100,21 @@ class ClusterManager:
     def get_cluster_status(self):
         status = {}
         for name, w in self.workers.items():
-            if w.fabric_node is None:
-                # Derive live status for local nodes (health checks don't run on them)
-                if w.status == "unresponsive":
-                    live_status = "unresponsive"
-                elif w.assigned_tasks:
-                    live_status = "busy"
-                else:
-                    live_status = "idle"
+            cores_used = w.allocated_cores
+            task_count = len(w.assigned_tasks)
+            if w.status == "unresponsive":
+                live_status = "unresponsive"
+            elif cores_used > 0:
+                live_status = "busy"
             else:
-                live_status = w.status
+                live_status = "idle"
             status[name] = {
                 "cores": w.cores,
-                "cores_used": w.allocated_cores,
+                "cores_used": cores_used,
                 "ram_mb": w.ram_mb,
                 "ram_used_mb": w.allocated_ram_mb,
                 "utilization": round(w.utilization() * 100, 1),
-                "tasks": len(w.assigned_tasks),
+                "tasks": task_count,
                 "status": live_status,
             }
         return status
@@ -150,6 +150,7 @@ class Scheduler:
         self.active_tasks = []
         self.completed_tasks = []
         self.max_quota_per_job = 0.5
+        self._lock = threading.Lock()
 
     def calculate_quotas(self):
         queued = self.job_manager.get_queued_jobs()
@@ -286,12 +287,14 @@ class Scheduler:
 
         assigned, unassigned = self.assign_tasks_to_nodes(subtasks)
 
-        if unassigned:
-            self.task_queue.extend(unassigned)
-            print(f"[SCHED] {len(unassigned)} sub-tasks queued (waiting for resources)")
+        with self._lock:
+            if unassigned:
+                self.task_queue.extend(unassigned)
+                print(f"[SCHED] {len(unassigned)} sub-tasks queued (waiting for resources)")
 
+            if assigned:
+                self.active_tasks.extend(assigned)
         if assigned:
-            self.active_tasks.extend(assigned)
             job.update_state("running")
             job.assigned_nodes = list(set(st.assigned_node for st in assigned))
             print(f"[SCHED] {job.job_name} running on nodes: {job.assigned_nodes}")
@@ -323,12 +326,13 @@ class Scheduler:
             job_assigned   = [st for st in assigned   if st.parent_job_id == job.job_id]
             job_unassigned = [st for st in unassigned if st.parent_job_id == job.job_id]
 
-            if job_unassigned:
-                self.task_queue.extend(job_unassigned)
-                print(f"[SCHED] {len(job_unassigned)} sub-task(s) queued for {job.job_name}")
-
+            with self._lock:
+                if job_unassigned:
+                    self.task_queue.extend(job_unassigned)
+                    print(f"[SCHED] {len(job_unassigned)} sub-task(s) queued for {job.job_name}")
+                if job_assigned:
+                    self.active_tasks.extend(job_assigned)
             if job_assigned:
-                self.active_tasks.extend(job_assigned)
                 job.update_state("running")
                 job.assigned_nodes = list(set(st.assigned_node for st in job_assigned))
                 print(f"[SCHED] {job.job_name} running on: {job.assigned_nodes}")
@@ -341,13 +345,15 @@ class Scheduler:
         if subtask.assigned_node and subtask.assigned_node in self.cluster.workers:
             node = self.cluster.workers[subtask.assigned_node]
             node.deallocate(subtask.cpus_needed, subtask.ram_needed, subtask)
-        if subtask in self.active_tasks:
-            self.active_tasks.remove(subtask)
-        self.completed_tasks.append(subtask)
+        with self._lock:
+            if subtask in self.active_tasks:
+                self.active_tasks.remove(subtask)
+            self.completed_tasks.append(subtask)
 
     def handle_job_completion(self, job_id: str):
         job = self.job_manager.get_job(job_id)
-        job_tasks = [t for t in self.completed_tasks if t.parent_job_id == job_id]
+        with self._lock:
+            job_tasks = [t for t in self.completed_tasks if t.parent_job_id == job_id]
         expected = job_tasks[0].total_chunks if job_tasks else job.chunks
         all_done = len(job_tasks) == expected
         all_ok = all(t.status == "completed" for t in job_tasks)
@@ -357,6 +363,10 @@ class Scheduler:
             job.update_state("completed")
             print(f"[SCHED] Job {job.job_name} completed successfully")
             return True
+        elif all_done:
+            job.update_state("failed", error="One or more subtasks failed")
+            print(f"[SCHED] Job {job.job_name} failed")
+            return True
         return False
 
     def handle_task_failure(self, subtask: SubTask, error: str):
@@ -364,26 +374,17 @@ class Scheduler:
         subtask.error = error
         self.release_resources(subtask)
 
-        node = self.select_node_for_task(subtask)
-        if node:
-            subtask.status = "pending"
-            subtask.error = None
-            subtask.assigned_node = node.name
-            node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
-            subtask.status = "assigned"
-            self.active_tasks.append(subtask)
-            print(f"[SCHED] Rescheduled failed sub-task to {node.name}")
-            return True
-        else:
-            # No node free right now — undo the completed_tasks entry and re-queue
+        # Re-queue so the dispatch mechanism can pick it up when a node is free
+        with self._lock:
             if subtask in self.completed_tasks:
                 self.completed_tasks.remove(subtask)
-            subtask.run_id += 1
-            subtask.status = "pending"
-            subtask.error = None
-            subtask.assigned_node = None
+        subtask.run_id += 1
+        subtask.status = "pending"
+        subtask.error = None
+        subtask.assigned_node = None
+        with self._lock:
             self.task_queue.append(subtask)
-            job = self.job_manager.get_job(subtask.parent_job_id)
-            job.update_state("queued")
-            print(f"[SCHED] No node available for {subtask.parent_job_id}-{subtask.chunk_index}, re-queued")
-            return False
+        job = self.job_manager.get_job(subtask.parent_job_id)
+        job.update_state("queued")
+        print(f"[SCHED] Re-queued failed sub-task {subtask.parent_job_id}-{subtask.chunk_index}")
+        return False
