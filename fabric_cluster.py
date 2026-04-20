@@ -19,8 +19,9 @@ def provide_fabric_cluster(fablib, cluster: ClusterManager, workers=None, site=N
         if existing:
             print(f"[FABRIC] Slice '{slice_name}' already exists, reconnecting...")
             return get_existing_slice(fablib, cluster, workers=workers, slice_name=slice_name)
-    except Exception:
-        pass
+    except Exception as e:
+        if "not found" not in str(e).lower():
+            print(f"[FABRIC] Warning: slice lookup failed ({e}), attempting fresh provision")
 
     if site is None:
         site = fablib.get_random_site()
@@ -43,18 +44,27 @@ def provide_fabric_cluster(fablib, cluster: ClusterManager, workers=None, site=N
     slice_obj.submit()
     print("[FABRIC] Slice is Active.")
 
+    failed_nodes = []
     for spec in workers:
-        fabric_node = slice_obj.get_node(spec["name"])
-        worker = WorkerNode(
-            name=spec["name"],
-            cores=spec["cores"],
-            ram_mb=spec["ram"] * 1024,   # GB -> MB
-            disk_gb=spec.get("disk", 20),
-        )
-        worker.fabric_node = fabric_node
-        cluster.workers[spec["name"]] = worker
-        print(f"[FABRIC]   {spec['name']} ready at {fabric_node.get_management_ip()}")
- 
+        try:
+            fabric_node = slice_obj.get_node(spec["name"])
+            worker = WorkerNode(
+                name=spec["name"],
+                cores=spec["cores"],
+                ram_mb=spec["ram"] * 1024,   # GB -> MB
+                disk_gb=spec.get("disk", 20),
+            )
+            worker.fabric_node = fabric_node
+            cluster.workers[spec["name"]] = worker
+            print(f"[FABRIC]   {spec['name']} ready at {fabric_node.get_management_ip()}")
+        except Exception as e:
+            print(f"[FABRIC]   ERROR attaching {spec['name']}: {e}")
+            failed_nodes.append(spec["name"])
+
+    if failed_nodes:
+        print(f"[FABRIC] WARNING: {len(failed_nodes)} node(s) failed to attach: {failed_nodes}")
+    if not cluster.workers:
+        raise RuntimeError("[FABRIC] No nodes attached — cluster unusable.")
     print(f"[FABRIC] Cluster ready: {list(cluster.workers.keys())}")
     return slice_obj
 
@@ -66,18 +76,27 @@ def get_existing_slice(fablib, cluster: ClusterManager, workers=None, slice_name
     slice_obj = fablib.get_slice(name=slice_name)
     print(f"[FABRIC] Re-attached to existing slice '{slice_name}'")
  
+    failed_nodes = []
     for spec in workers:
-        fabric_node = slice_obj.get_node(spec["name"])
-        worker = WorkerNode(
-            name=spec["name"],
-            cores=spec["cores"],
-            ram_mb=spec["ram"] * 1024,
-            disk_gb=spec.get("disk", 20),
-        )
-        worker.fabric_node = fabric_node
-        cluster.workers[spec["name"]] = worker
-        print(f"[FABRIC]   {spec['name']} at {fabric_node.get_management_ip()}")
- 
+        try:
+            fabric_node = slice_obj.get_node(spec["name"])
+            worker = WorkerNode(
+                name=spec["name"],
+                cores=spec["cores"],
+                ram_mb=spec["ram"] * 1024,
+                disk_gb=spec.get("disk", 20),
+            )
+            worker.fabric_node = fabric_node
+            cluster.workers[spec["name"]] = worker
+            print(f"[FABRIC]   {spec['name']} at {fabric_node.get_management_ip()}")
+        except Exception as e:
+            print(f"[FABRIC]   ERROR attaching {spec['name']}: {e}")
+            failed_nodes.append(spec["name"])
+
+    if failed_nodes:
+        print(f"[FABRIC] WARNING: {len(failed_nodes)} node(s) failed to attach: {failed_nodes}")
+    if not cluster.workers:
+        raise RuntimeError("[FABRIC] No nodes attached — cluster unusable.")
     return slice_obj
 
 def teardown_fabric_cluster(fablib, slice_name=SLICE_NAME):

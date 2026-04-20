@@ -1,7 +1,6 @@
 # Distributed Cluster Job Manager
 
 A distributed cluster job manager built on FABRIC that maps user-submitted workloads to resources across multiple VMs. The system supports job scheduling with resource quotas, task decomposition across nodes, load balancing, and fault handling.
-Note: This is a local prototype that simulates the cluster without requiring the FABRIC API. The full scheduling, execution, and monitoring logic can be demonstrated and verified before deploying on FABRIC.
 
 ## Architecture
 
@@ -9,23 +8,14 @@ The system follows a manager-worker architecture. A central manager node maintai
 
 ## Modules
 
-### Job Submission (`job_submission.py`)
-Handles parsing and validation of job description files (YAML/JSON). Each job specifies the command to run, resource requirements (CPU, memory), an optional time limit, and whether the job can be split across multiple nodes.
-
-### Scheduler (`scheduler.py`)
-The core scheduling engine. Determines resource quotas for each job based on current cluster utilization, decomposes large jobs into sub-tasks that can be distributed across multiple workers, and performs load balancing to prevent any single node from being overloaded. Implements a scheduling policy that manages resource sharing when multiple jobs compete for the same pool of nodes.
-
-### Executor (`executor.py`)
-Runs sub-tasks on worker nodes. The prototype executes tasks locally as subprocesses with parallel threading. Will use SSH-based remote execution when deployed on FABRIC.
-
-### Monitor (`monitor.py`)
-Tracks job progress across all worker nodes. Detects failures such as unresponsive nodes, exceeded time limits, or resource exhaustion. Updates job state (queued, running, completed, failed) and handles rescheduling of failed sub-tasks to healthy nodes.
-
-### Persistence (`persistence.py`)
-Stores job metadata, cluster state, and execution history. Maintains a record of all submitted jobs and their outcomes for status queries.
-
-### User Interface (`interface.py`)
-Jupyter notebook widget interface for submitting jobs (via form or YAML/JSON file upload), viewing a job status dashboard, inspecting job details, and monitoring cluster state.
+- **`jobsubmission.py`** — Handles parsing and validation of job description files (YAML/JSON). Each job specifies the command to run, resource requirements (CPU, memory), an optional time limit, and whether the job can be split across multiple nodes.
+- **`scheduler.py`** — Core scheduling engine. Determines resource quotas, decomposes large jobs into sub-tasks, and performs load balancing to prevent any single node from being overloaded.
+- **`executor.py`** — Runs sub-tasks on worker nodes as local subprocesses with parallel threading. Will use SSH-based remote execution when deployed on FABRIC.
+- **`monitor.py`** — Tracks job progress across all worker nodes. Detects failures (unresponsive nodes, exceeded time limits, resource exhaustion) and reschedules failed sub-tasks to healthy nodes.
+- **`persistence.py`** — Stores job metadata, cluster state, and execution history for status queries.
+- **`interface.py`** — Jupyter notebook widget interface for submitting jobs, viewing a job status dashboard, inspecting job details, and monitoring cluster state.
+- **`fabric_cluster.py`** — Provisions and manages the FABRIC slice. Creates worker nodes on a remote site, reconnects to existing slices, and tears down infrastructure when done.
+- **`system.py`** — Central coordinator that wires all components together and exposes a clean API used by the demo notebook (provision, run demos, show UI, teardown).
 
 ## Job Description Format
 
@@ -42,11 +32,11 @@ distributable: true
 chunks: 3
 ```
 
-# Dependencies
+## Dependencies
 
-Python 3.x
-PyYAML
-ipywidgets
+- Python 3.x
+- PyYAML
+- ipywidgets
 
 
-Demo Video: https://www.loom.com/share/f8b4ad249f304e408125a16ce65440a8
+Demo Video: https://www.loom.com/share/d9629a6892f64234a23232bf1775c36f

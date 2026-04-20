@@ -41,7 +41,7 @@ class NotebookUI:
 
         def _loop():
             while self._polling:
-                self.monitor.poll(interval=interval)
+                self.monitor.poll()
                 time.sleep(interval)
 
         self._poll_thread = threading.Thread(target=_loop, daemon=True)
@@ -178,7 +178,7 @@ class NotebookUI:
         self.logs_refresh_btn.on_click(self._on_logs_refresh)
 
         return widgets.VBox([
-            widgets.HTML("<h3>Monitor Logs</h3>"),
+            widgets.HTML("<h3>Event Logs &amp; Task Output</h3>"),
             self.logs_refresh_btn, self.logs_out,
         ])
 
@@ -197,7 +197,7 @@ class NotebookUI:
         for i, title in enumerate([
             "Submit Job", "Upload File", "Run All",
             "Dashboard", "Job Details", "Cancel Job",
-            "Cluster", "Logs"
+            "Cluster", "Logs & Output"
         ]):
             tabs.set_title(i, title)
         display(tabs)
@@ -236,19 +236,56 @@ class NotebookUI:
                 content = (file_info["content"]
                            if isinstance(file_info, dict)
                            else file_info.content)
-                name    = (file_info["metadata"]["name"]
+                name    = (file_info.get("metadata", {}).get("name")
+                           or file_info.get("name")
                            if isinstance(file_info, dict)
                            else file_info.name)
+                if isinstance(content, memoryview):
+                    content = bytes(content)
                 text    = content.decode("utf-8") \
                     if isinstance(content, bytes) else content
                 data    = (yaml.safe_load(text)
                            if name.endswith((".yaml", ".yml"))
                            else _json.loads(text))
-                job = self.job_manager.submit(data)
-                print(f"Job queued from file: {job.job_id} ({job.job_name})")
-                print("Use 'Run All' tab to schedule and execute.")
+                jobs = self.job_manager.submit_many(data)
+                for job in jobs:
+                    print(f"Job queued: {job.job_id} ({job.job_name})")
+                print(f"{len(jobs)} job(s) queued. Use 'Run All' tab to execute.")
             except Exception as e:
                 print(f"Error: {e}")
+
+    def _run_and_release_subtask(self, subtask):
+        job = self.job_manager.get_job(subtask.parent_job_id)
+        self.executor.run_subtask(subtask, timeout=job.time_limit)
+        self.scheduler.release_resources(subtask)
+        self.scheduler.handle_job_completion(subtask.parent_job_id)
+        self.persistence.record_job(job.to_dict())
+        self._dispatch_queued_subtasks()
+
+    def _dispatch_queued_subtasks(self):
+        to_run = []
+        with self.scheduler._lock:
+            still_waiting = []
+            for subtask in list(self.scheduler.task_queue):
+                node = self.scheduler.select_node_for_task(subtask)
+                if node:
+                    node.allocate(subtask.cpus_needed, subtask.ram_needed, subtask)
+                    subtask.assigned_node = node.name
+                    subtask.status = "assigned"
+                    self.scheduler.active_tasks.append(subtask)
+                    to_run.append(subtask)
+                else:
+                    still_waiting.append(subtask)
+            self.scheduler.task_queue = still_waiting
+
+        for subtask in to_run:
+            job = self.job_manager.get_job(subtask.parent_job_id)
+            job.update_state("running")
+            job.assigned_nodes = list(set((job.assigned_nodes or []) + [subtask.assigned_node]))
+            threading.Thread(
+                target=self._run_and_release_subtask,
+                args=(subtask,), daemon=True
+            ).start()
 
     def _on_run_all(self, _button):
         self.run_all_out.clear_output()
@@ -270,30 +307,31 @@ class NotebookUI:
                 print("No subtasks could be assigned.")
                 return
 
-            print(f"\nExecuting {len(all_active)} subtask(s) in parallel...")
+            print(f"\nExecuting {len(all_active)} subtask(s) in parallel "
+                  f"(running in background — refresh Cluster/Dashboard tabs to monitor)...")
 
-            def _run_and_release(subtask):
-                job     = self.job_manager.get_job(subtask.parent_job_id)
-                timeout = job.time_limit
-                self.executor.run_subtask(subtask, timeout=timeout)
-                self.scheduler.release_resources(subtask)
-                self.scheduler.handle_job_completion(subtask.parent_job_id)
-                self.persistence.record_job(job.to_dict())
+        threads = [
+            threading.Thread(target=self._run_and_release_subtask, args=(st,), daemon=True)
+            for st in all_active
+        ]
+        for t in threads:
+            t.start()
 
-            threads = [
-                threading.Thread(target=_run_and_release, args=(st,), daemon=True)
-                for st in all_active
-            ]
-            for t in threads:
-                t.start()
+        def _wait_and_report():
             for t in threads:
                 t.join()
+            # Wait for any dispatched follow-on subtasks to drain too
+            while any(st.status in ("assigned", "running")
+                      for st in self.scheduler.active_tasks):
+                time.sleep(1)
+            with self.run_all_out:
+                print("\nAll subtasks finished.")
+                for job_id, _, _ in results:
+                    job = self.job_manager.get_job(job_id)
+                    print(f"  {job.job_name}: {job.state}"
+                          + (f" — {job.error}" if job.error else ""))
 
-            print("\nAll subtasks finished.")
-            for job_id, _, _ in results:
-                job = self.job_manager.get_job(job_id)
-                print(f"  {job.job_name}: {job.state}"
-                      + (f" — {job.error}" if job.error else ""))
+        threading.Thread(target=_wait_and_report, daemon=True).start()
 
     def _on_refresh(self, _button):
         self.status_out.clear_output()
@@ -338,6 +376,24 @@ class NotebookUI:
                 status = self.monitor.check_job_status(job_id)
                 for k, v in status.items():
                     print(f"{k}: {v}")
+
+                job_tasks = sorted(
+                    [t for t in self.scheduler.completed_tasks if t.parent_job_id == job_id],
+                    key=lambda t: t.chunk_index,
+                )
+                if job_tasks:
+                    print("\n--- Subtask Output ---")
+                    for task in job_tasks:
+                        sid = f"{job_id}-{task.chunk_index}"
+                        result = self.executor.results.get(sid)
+                        print(f"\n[Chunk {task.chunk_index}/{task.total_chunks}]"
+                              f" status={task.status}")
+                        if result:
+                            print(f"  duration={result.duration}s  rc={result.return_code}")
+                            if result.stdout:
+                                print(f"  stdout:\n    {result.stdout}")
+                            if result.stderr:
+                                print(f"  stderr:\n    {result.stderr}")
             except KeyError:
                 print(f"Job '{job_id}' not found.")
 
@@ -361,6 +417,13 @@ class NotebookUI:
             if not status:
                 print("No cluster initialized.")
                 return
+
+            # Count completed tasks per node from scheduler history
+            completed_per_node = {}
+            for t in self.scheduler.completed_tasks:
+                completed_per_node[t.assigned_node] = \
+                    completed_per_node.get(t.assigned_node, 0) + 1
+
             html  = ("<table style='width:100%;border-collapse:collapse;'>"
                      "<tr style='background:#333;color:white;'>"
                      "<th style='padding:6px'>Node</th>"
@@ -369,14 +432,23 @@ class NotebookUI:
                      "<th style='padding:6px'>RAM (MB)</th>"
                      "<th style='padding:6px'>RAM Used</th>"
                      "<th style='padding:6px'>Utilization</th>"
-                     "<th style='padding:6px'>Tasks</th>"
+                     "<th style='padding:6px'>Active Tasks</th>"
+                     "<th style='padding:6px'>Completed Tasks</th>"
                      "<th style='padding:6px'>Status</th>"
                      "</tr>")
             for name, info in status.items():
-                util = info["utilization"]
-                bg   = ("#c3e6cb" if util < 50
-                        else "#ffeeba" if util < 80
-                        else "#f5c6cb")
+                util        = info["utilization"]
+                node_status = info["status"]
+                completed   = completed_per_node.get(name, 0)
+                if node_status == "unresponsive":
+                    bg          = "#f5c6cb"
+                    status_html = "<b style='color:#c0392b'>unresponsive</b>"
+                elif node_status == "busy":
+                    bg          = "#b8daff"
+                    status_html = "<b style='color:#1a6bbd'>busy</b>"
+                else:
+                    bg          = "#c3e6cb"
+                    status_html = "<span style='color:#1e7e34'>idle</span>"
                 html += (f"<tr style='background:{bg}'>"
                          f"<td style='padding:6px'>{name}</td>"
                          f"<td style='padding:6px'>{info['cores']}</td>"
@@ -385,7 +457,8 @@ class NotebookUI:
                          f"<td style='padding:6px'>{info['ram_used_mb']}</td>"
                          f"<td style='padding:6px'>{util}%</td>"
                          f"<td style='padding:6px'>{info['tasks']}</td>"
-                         f"<td style='padding:6px'>{info['status']}</td>"
+                         f"<td style='padding:6px'>{completed}</td>"
+                         f"<td style='padding:6px'>{status_html}</td>"
                          "</tr>")
             html += "</table>"
             display(HTML(html))
@@ -393,9 +466,23 @@ class NotebookUI:
     def _on_logs_refresh(self, _button):
         self.logs_out.clear_output()
         with self.logs_out:
+            print("=== System Event Logs ===")
             logs = self.monitor.get_logs(last_n=40)
             if not logs:
                 print("No monitor logs yet.")
-                return
-            for entry in logs:
-                print(entry)
+            else:
+                for entry in logs:
+                    print(entry)
+
+            print("\n=== Task Output ===")
+            if not self.executor.results:
+                print("No task results yet.")
+            else:
+                for sid, result in sorted(self.executor.results.items()):
+                    status_str = "OK" if result.success else "FAILED"
+                    print(f"\n[{sid}] {status_str}"
+                          f" ({result.duration}s, rc={result.return_code})")
+                    if result.stdout:
+                        print(f"  stdout:\n    {result.stdout}")
+                    if result.stderr:
+                        print(f"  stderr:\n    {result.stderr}")

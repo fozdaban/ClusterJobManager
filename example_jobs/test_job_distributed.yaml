@@ -1,0 +1,8 @@
+job_name: distributed_task
+command: echo "chunk running"
+resources:
+  cpus: 4
+  memory_mb: 2048
+time_limit: 60
+distributable: true
+chunks: 3
